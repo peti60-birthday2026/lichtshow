@@ -1,0 +1,196 @@
+
+<div style="display:flex; flex-direction:column; gap:12px; padding:1rem 0;">
+  <div style="display:flex; gap:8px; flex-wrap:wrap;">
+    <button id="btn-mic"><i class="ti ti-microphone" style="margin-right:6px"></i>Mikrofon starten</button>
+    <button id="btn-file"><i class="ti ti-upload" style="margin-right:6px"></i>Musikdatei laden</button>
+    <input type="file" id="file-input" accept="audio/*" style="display:none" />
+    <button id="btn-stop" style="display:none"><i class="ti ti-player-stop" style="margin-right:6px"></i>Stopp</button>
+  </div>
+
+  <div id="status" style="font-size:13px; color:var(--text-secondary);">Bereit. Wähle Mikrofon oder Musikdatei.</div>
+
+  <div style="position:relative; width:100%; height:420px; background:#050505; border-radius:12px; overflow:hidden;">
+    <canvas id="viz" style="width:100%; height:100%; display:block;"></canvas>
+  </div>
+
+  <div style="display:flex; align-items:center; gap:12px;">
+    <label style="font-size:13px; color:var(--text-secondary);">Empfindlichkeit</label>
+    <input type="range" id="sens" min="0.5" max="3" step="0.1" value="1.4" style="flex:1;" />
+    <span id="sens-out" style="font-size:13px; min-width:28px;">1.4</span>
+  </div>
+
+  <audio id="audio-el" style="display:none"></audio>
+</div>
+
+<script>
+(function(){
+  const canvas = document.getElementById('viz');
+  const ctx = canvas.getContext('2d');
+  const statusEl = document.getElementById('status');
+  const btnMic = document.getElementById('btn-mic');
+  const btnFile = document.getElementById('btn-file');
+  const btnStop = document.getElementById('btn-stop');
+  const fileInput = document.getElementById('file-input');
+  const audioEl = document.getElementById('audio-el');
+  const sens = document.getElementById('sens');
+  const sensOut = document.getElementById('sens-out');
+
+  let audioCtx, analyser, source, dataArray, bufferLength, rafId, stream;
+  let hueBase = 200;
+  let particles = [];
+
+  function resize(){
+    const rect = canvas.parentElement.getBoundingClientRect();
+    canvas.width = rect.width * devicePixelRatio;
+    canvas.height = rect.height * devicePixelRatio;
+    ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  sens.addEventListener('input', () => { sensOut.textContent = sens.value; });
+
+  function setupAnalyser(){
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    bufferLength = analyser.frequencyBinCount;
+    dataArray = new Uint8Array(bufferLength);
+  }
+
+  async function startMic(){
+    stopAll();
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setupAnalyser();
+      source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      statusEl.textContent = 'Mikrofon aktiv — Musik läuft über Lautsprecher, wird aufgenommen.';
+      btnStop.style.display = 'inline-flex';
+      draw();
+    } catch(e){
+      statusEl.textContent = 'Mikrofonzugriff verweigert oder nicht verfügbar.';
+    }
+  }
+
+  function loadFile(file){
+    stopAll();
+    const url = URL.createObjectURL(file);
+    audioEl.src = url;
+    setupAnalyser();
+    source = audioCtx.createMediaElementSource(audioEl);
+    source.connect(analyser);
+    analyser.connect(audioCtx.destination);
+    audioEl.play();
+    statusEl.textContent = 'Datei geladen: ' + file.name;
+    btnStop.style.display = 'inline-flex';
+    draw();
+  }
+
+  function stopAll(){
+    if (rafId) cancelAnimationFrame(rafId);
+    if (source) { try { source.disconnect(); } catch(e){} }
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    if (audioCtx) { try { audioCtx.close(); } catch(e){} audioCtx = null; }
+    audioEl.pause();
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    btnStop.style.display = 'none';
+    particles = [];
+  }
+
+  btnMic.addEventListener('click', startMic);
+  btnFile.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files[0]) loadFile(e.target.files[0]);
+  });
+  btnStop.addEventListener('click', () => {
+    stopAll();
+    statusEl.textContent = 'Gestoppt.';
+  });
+
+  function draw(){
+    rafId = requestAnimationFrame(draw);
+    analyser.getByteFrequencyData(dataArray);
+
+    const w = canvas.width / devicePixelRatio;
+    const h = canvas.height / devicePixelRatio;
+    const sensitivity = parseFloat(sens.value);
+
+    ctx.fillStyle = 'rgba(5,5,5,0.18)';
+    ctx.fillRect(0,0,w,h);
+
+    let bassSum = 0, midSum = 0, trebSum = 0;
+    const third = Math.floor(bufferLength/3);
+    for (let i=0;i<third;i++) bassSum += dataArray[i];
+    for (let i=third;i<third*2;i++) midSum += dataArray[i];
+    for (let i=third*2;i<bufferLength;i++) trebSum += dataArray[i];
+    const bass = (bassSum/third)/255 * sensitivity;
+    const mid = (midSum/third)/255 * sensitivity;
+    const treb = (trebSum/(bufferLength-third*2))/255 * sensitivity;
+
+    hueBase += 0.4 + bass*2;
+
+    const cx = w/2, cy = h/2;
+
+    // abstract wave rings
+    for (let ring=0; ring<4; ring++){
+      const amp = (bass*0.6 + mid*0.4) * (60 + ring*30);
+      const baseR = 40 + ring*50;
+      ctx.beginPath();
+      const points = 64;
+      for (let i=0;i<=points;i++){
+        const angle = (i/points) * Math.PI*2;
+        const freqIdx = Math.floor((i/points) * bufferLength * 0.5);
+        const val = dataArray[freqIdx]/255;
+        const r = baseR + val*amp*0.5 + Math.sin(angle*3 + hueBase*0.02)*10;
+        const x = cx + Math.cos(angle)*r;
+        const y = cy + Math.sin(angle)*r;
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.closePath();
+      const hue = (hueBase + ring*60) % 360;
+      ctx.strokeStyle = 'hsla(' + hue + ', 85%, 60%, 0.8)';
+      ctx.lineWidth = 2 + bass*4;
+      ctx.stroke();
+    }
+
+    // flowing wave lines across screen
+    for (let line=0; line<3; line++){
+      ctx.beginPath();
+      const yOff = h/2 + (line-1)*80;
+      for (let x=0; x<=w; x+=8){
+        const idx = Math.floor((x/w) * bufferLength * 0.7);
+        const val = dataArray[idx]/255;
+        const y = yOff + Math.sin(x*0.02 + hueBase*0.03 + line) * (20 + val*100*sensitivity);
+        if (x===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      const hue2 = (hueBase + 120 + line*40) % 360;
+      ctx.strokeStyle = 'hsla(' + hue2 + ', 80%, 55%, 0.5)';
+      ctx.lineWidth = 1.5 + treb*3;
+      ctx.stroke();
+    }
+
+    // particles on strong bass hits
+    if (bass > 0.55 && Math.random() < 0.5){
+      for (let i=0;i<3;i++){
+        particles.push({
+          x: cx + (Math.random()-0.5)*100,
+          y: cy + (Math.random()-0.5)*100,
+          vx: (Math.random()-0.5)*6,
+          vy: (Math.random()-0.5)*6,
+          life: 1,
+          hue: (hueBase + Math.random()*80) % 360
+        });
+      }
+    }
+    particles.forEach(p => {
+      p.x += p.vx; p.y += p.vy; p.life -= 0.02;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3*p.life, 0, Math.PI*2);
+      ctx.fillStyle = 'hsla(' + p.hue + ', 90%, 65%, ' + Math.max(p.life,0) + ')';
+      ctx.fill();
+    });
+    particles = particles.filter(p => p.life > 0);
+  }
+})();
+</script>
